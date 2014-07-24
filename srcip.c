@@ -64,8 +64,6 @@ void* redis_timer (void * args) {
 }
 
 static void redis_init() {
-  // struct timeval timeout = { 1, 500000 }; // 1.5 seconds
-  // REDIS = redisConnectWithTimeout("127.0.0.1", 6379, timeout);
   REDIS = redisConnect("127.0.0.1", 6379);
   if (REDIS == NULL || REDIS->err) {
     if (REDIS) {
@@ -74,6 +72,7 @@ static void redis_init() {
     } else {
       printf("REDIS Connection error: can't allocate redis context\n");
     }
+    REDIS = NULL;
     // exit(1);
   } else {
     redisEnableKeepAlive(REDIS);
@@ -87,9 +86,6 @@ static void redis_init() {
 }
 
 static void redis_term() {
-#ifdef DEBUG
-  fprintf(stderr, "%f redis_term\n", current_time());
-#endif
   if (REDIS != NULL) {
     redisFree(REDIS);
     REDIS = NULL;
@@ -115,10 +111,12 @@ static void publish_agent_telemetry(char* buffer, int bufi) {
   memcpy(buffer+AGENT_PREAMBLE_LEN+msg_len+bufi, "\r\n", 2);
   buffer[payload_len] = 0;
 
-  redisAppendFormattedCommand(REDIS,buffer, payload_len);
-  redisReply *reply;
-  redisGetReply(REDIS, (void*)&reply);
-  freeReplyObject(reply);
+  if (REDIS != NULL) {
+    redisAppendFormattedCommand(REDIS,buffer, payload_len);
+    redisReply *reply;
+    redisGetReply(REDIS, (void*)&reply);
+    freeReplyObject(reply);
+  }
 
 }
 
@@ -187,8 +185,10 @@ static void flush_srcip_cache(double network_time) {
       uint len = strlen(val);
       if (bufi + len > sizeof(buffer)) {
 	// fprintf(stderr, "%s\n", buffer);
-	redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
-	freeReplyObject(reply);
+	if (REDIS != NULL) {
+	  redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
+	  freeReplyObject(reply);
+	}
 	sprintf(buffer, "PUBLISH %s ", SRCIP_CHANNEL);
 	bufi = strlen(buffer);
 	buffer[bufi] = 0;
@@ -213,8 +213,10 @@ static void flush_srcip_cache(double network_time) {
 	
     if (DEBUG) fprintf(stderr, "%s\n", buffer);
     // fprintf(stderr, "%f srcip index used %lu bytes of memory, total cache cost: %lu expected=%lu found=%lu total=%lu\n", network_time, index_size, (cache_count*48)+index_size, delta, cache_count, SRCIP_TOTAL);
-    redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
-    freeReplyObject(reply);
+    if (REDIS != NULL) {
+      redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
+      freeReplyObject(reply);
+    }
   }
 
 }
@@ -301,10 +303,12 @@ static void redis_flush() {
   Word_t reqs = flush_agent_cache(start);
 
   // Emit health heartbeat                                                                                                                             
-  char buffer[256];
-  sprintf(buffer, "PUBLISH %s %f,R,%lu,%lu,%lu", AGENT_CHANNEL, start, reqs, AGENT_COUNT, AGENT_TOTAL);
-  redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
-  freeReplyObject(reply);
+  if (REDIS != NULL) {
+    char buffer[256];
+    sprintf(buffer, "PUBLISH %s %f,R,%lu,%lu,%lu", AGENT_CHANNEL, start, reqs, AGENT_COUNT, AGENT_TOTAL);
+    redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
+    freeReplyObject(reply);
+  }
 
 }
 
@@ -378,7 +382,9 @@ static void usage(const char* program, const char* default_filter) {
 }
 
 static void endprocess(int signo) {
+  printf("exiting\n");
   pcap_close(pd);
+  printf("exiting\n");
   redis_term();
   exit(0);
 }
