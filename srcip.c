@@ -36,11 +36,12 @@ struct AgentInfo {
   uint total;
 };
 
-const char* AGENT_CHANNEL = "checkip";
+char AGENT_CHANNEL[64] = "ua";
 
 Pvoid_t SRCIP_CACHE = (Pvoid_t) NULL;
 Word_t  SRCIP_TOTAL = 0;
 Word_t  SRCIP_COUNT = 0;
+char    SRCIP_CHANNEL[64] = "srcip";
 
 redisContext *REDIS = NULL;
 
@@ -68,12 +69,12 @@ static void redis_init() {
   REDIS = redisConnect("127.0.0.1", 6379);
   if (REDIS == NULL || REDIS->err) {
     if (REDIS) {
-      printf("Connection error: %s\n", REDIS->errstr);
+      printf("REDIS Connection error: %s\n", REDIS->errstr);
       redisFree(REDIS);
     } else {
-      printf("Connection error: can't allocate redis context\n");
+      printf("REDIS Connection error: can't allocate redis context\n");
     }
-    exit(1);
+    // exit(1);
   } else {
     redisEnableKeepAlive(REDIS);
     // Init the preamble we'll use for each telemetry publish                                                                                          
@@ -97,7 +98,7 @@ static void redis_term() {
 
 static void publish_agent_telemetry(char* buffer, int bufi) {
 
-  if (DEBUG)
+  //  if (DEBUG)
     printf("PUBLISH %s %s\n", AGENT_CHANNEL, buffer);
 
   char command[64];
@@ -171,7 +172,7 @@ static void flush_srcip_cache(double network_time) {
     Word_t cache_count = 0;
     PWord_t PV = NULL;
 	
-    sprintf(buffer, "PUBLISH %s ", AGENT_CHANNEL);
+    sprintf(buffer, "PUBLISH %s ", SRCIP_CHANNEL);
     bufi = strlen(buffer);
     buffer[bufi] = 0;
 
@@ -188,7 +189,7 @@ static void flush_srcip_cache(double network_time) {
 	// fprintf(stderr, "%s\n", buffer);
 	redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
 	freeReplyObject(reply);
-	sprintf(buffer, "PUBLISH %s ", AGENT_CHANNEL);
+	sprintf(buffer, "PUBLISH %s ", SRCIP_CHANNEL);
 	bufi = strlen(buffer);
 	buffer[bufi] = 0;
       } 
@@ -356,7 +357,7 @@ static void parse_packet(u_char *user, struct pcap_pkthdr *packethdr, u_char *pa
     int port = ntohs(tcphdr->source);
     // if (DEBUG) printf("TCP  %s:%d\n", srcip, ntohs(tcphdr->source));
     add_srcip(start, "TCP", srcip, port);
-    if (AGENT_TRACK) {
+    if (AGENT_TRACK && ntohs(tcphdr->dest) == 80) {
       // Until we can crack the agent header ... substitute one for now
       add_user_agent(start, srcip, ntohs(iphdr->ip_id), iphdr->ip_tos, iphdr->ip_ttl, port, "unknown");
     }
@@ -369,8 +370,9 @@ static void parse_packet(u_char *user, struct pcap_pkthdr *packethdr, u_char *pa
 }
 
 static void usage(const char* program, const char* default_filter) {
-  printf("usage: %s [-h] [-a] [-d] -i INTERFACE [filter...]\n", program);
-  printf("  [-a] enable user agent tracking (partially working), applies only to tcp port 80 w/ custom filter\n");
+  printf("usage: %s [-h] [-a CHANNEL] [-c CHANNEL] [-d] -i INTERFACE [filter...]\n", program);
+  printf("  [-a CHANNEL] enable user agent tracking (partially working) and channel [default 'ua', applies only to tcp port 80\n");
+  printf("  [-c CHANNEL] pubsub channel, defaults to 'srcip'\n");
   printf("  [-d] debug output\n");
   printf("  [filter...] %s\n", default_filter);
 }
@@ -386,11 +388,15 @@ int main(int argc, char **argv) {
   char interface[256] = "", filter[256] = "tcp port 80 and tcp[13] == 2";
   int packets = 0, c;
   // Get the command line options, if any
-  while ((c = getopt (argc, argv, "adhi:")) != -1) {
+  while ((c = getopt (argc, argv, "a:c:dhi:")) != -1) {
     switch (c)
       {
       case 'a':
 	AGENT_TRACK = 1;
+	strcpy(AGENT_CHANNEL, optarg);
+	break;
+      case 'c':
+	strcpy(SRCIP_CHANNEL, optarg);
 	break;
       case 'd':
 	DEBUG = 1;
@@ -420,7 +426,9 @@ int main(int argc, char **argv) {
   }
   if (custom_filter[0] != 0) strcpy(filter, custom_filter);
 
-  printf("DEBUG=%d FILTER='%s'\n", DEBUG, filter); 
+  printf("CHANNEL=%s DEBUG=%d FILTER='%s'\n", SRCIP_CHANNEL, DEBUG, filter); 
+  if (AGENT_TRACK) 
+    printf("AGENT enabled, CHANNEL=%s\n", AGENT_CHANNEL);
 
   // Open libpcap, set the program termination signals then start
   // processing packets.
