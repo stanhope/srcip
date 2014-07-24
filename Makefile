@@ -11,7 +11,7 @@ all: $(SOURCES) $(TARGET)
 #	$(CC) $(LDFLAGS) $(OBJECTS) -o $@ -lpcap -lJudy
 
 $(TARGET): $(OBJECTS) 
-	$(CC) $(LDFLAGS) $(OBJECTS) -o $@ -lpcap -lJudy
+	$(CC) $(LDFLAGS) $(OBJECTS) -o $@ /usr/lib/x86_64-linux-gnu/libpcap.a /usr/lib/libJudy.a
 
 .c.o:
 	$(CC) $(CFLAGS) $< -o $@
