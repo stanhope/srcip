@@ -97,7 +97,8 @@ static void redis_term() {
 
 static void publish_agent_telemetry(char* buffer, int bufi) {
 
-  printf("%s\n", buffer);
+  if (DEBUG)
+    printf("PUBLISH %s %s\n", AGENT_CHANNEL, buffer);
 
   char command[64];
   sprintf(command, "$%d\r\n", bufi);
@@ -353,6 +354,7 @@ static void parse_packet(u_char *user, struct pcap_pkthdr *packethdr, u_char *pa
   if (iphdr->ip_p == IPPROTO_TCP) {
     struct tcphdr* tcphdr = (struct tcphdr*)packetptr;
     int port = ntohs(tcphdr->source);
+    // if (DEBUG) printf("TCP  %s:%d\n", srcip, ntohs(tcphdr->source));
     add_srcip(start, "TCP", srcip, port);
     if (AGENT_TRACK) {
       // Until we can crack the agent header ... substitute one for now
@@ -361,13 +363,14 @@ static void parse_packet(u_char *user, struct pcap_pkthdr *packethdr, u_char *pa
   }
   else if (iphdr->ip_p == IPPROTO_UDP) {
     struct udphdr* udphdr = (struct udphdr*)packetptr;
+    // if (DEBUG) printf("UDP  %s:%d\n", srcip, ntohs(udphdr->source));
     add_srcip(start, "UDP", srcip, ntohs(udphdr->source));
   }
 }
 
 static void usage(const char* program, const char* default_filter) {
   printf("usage: %s [-h] [-a] [-d] -i INTERFACE [filter...]\n", program);
-  printf("  [-a] enable user agent tracking (not working yet), applies only to tcp port 80 w/ custom filter\n");
+  printf("  [-a] enable user agent tracking (partially working), applies only to tcp port 80 w/ custom filter\n");
   printf("  [-d] debug output\n");
   printf("  [filter...] %s\n", default_filter);
 }
@@ -383,9 +386,12 @@ int main(int argc, char **argv) {
   char interface[256] = "", filter[256] = "tcp port 80 and tcp[13] == 2";
   int packets = 0, c;
   // Get the command line options, if any
-  while ((c = getopt (argc, argv, "dhi:")) != -1) {
+  while ((c = getopt (argc, argv, "adhi:")) != -1) {
     switch (c)
       {
+      case 'a':
+	AGENT_TRACK = 1;
+	break;
       case 'd':
 	DEBUG = 1;
 	break;
