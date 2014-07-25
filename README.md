@@ -9,11 +9,13 @@ Usage:
 
 ```
 sudo ./srcip [-a CHANNEL] [-c CHANNEL] [-d] [-h] -i INTERFACE [filter...]
-   [-a CHANNEL] - enable user agent tracking (partially working) and channel [default 'ua', applies only to tcp port 80\
+   [-a CHANNEL] - enable user agent tracking and channel to publish to
+                  partially working. Applies only when filter includes 'tcp port 80'
    [-c CHANNEL] - pubsub channel, defaults to 'srcip'
-   [-d] - enable debug output
-   [-h] - show this help message
-   [filter...] - default is 'tcp port 80 and tcp[13] == 2'
+   [-d]         - enable debug output
+   [-h]         - show this help message
+   [-s SERVER]  - change the server (defaults to 127.0.0.1)
+   [filter...]  - default is 'tcp port 80 and tcp[13] == 2'
 ```
 
 

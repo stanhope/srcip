@@ -29,6 +29,7 @@ int     AGENT_PREAMBLE_LEN = 0;
 char    AGENT_PREAMBLE[64];
 int     DEBUG = 0;
 int     AGENT_TRACK = 0;
+char    AGENT_CHANNEL[64] = "";
 
 struct AgentInfo {
   uint first_issued;
@@ -36,7 +37,17 @@ struct AgentInfo {
   uint total;
 };
 
-char AGENT_CHANNEL[64] = "ua";
+int     COUNT_TRACK = 0;
+char    COUNT_CHANNEL[64] = "";
+Pvoid_t COUNT_CACHE = (PWord_t) NULL;
+Word_t  COUNT_CNT = 0;
+Word_t  COUNT_TOTAL = 0;
+
+struct IP_Info {
+  uint first_issued;
+  uint cnt;
+  uint total;
+};
 
 Pvoid_t SRCIP_CACHE = (Pvoid_t) NULL;
 Word_t  SRCIP_TOTAL = 0;
@@ -54,6 +65,8 @@ static double current_time()
   return now;
 }
 
+char REDIS_SERVER[64] = "127.0.0.1";
+
 static void redis_flush();
 
 void* redis_timer (void * args) {
@@ -64,7 +77,7 @@ void* redis_timer (void * args) {
 }
 
 static void redis_init() {
-  REDIS = redisConnect("127.0.0.1", 6379);
+  REDIS = redisConnect(REDIS_SERVER, 6379);
   if (REDIS == NULL || REDIS->err) {
     if (REDIS) {
       printf("REDIS Connection error: %s\n", REDIS->errstr);
@@ -94,7 +107,7 @@ static void redis_term() {
 
 static void publish_agent_telemetry(char* buffer, int bufi) {
 
-  //  if (DEBUG)
+  if (DEBUG)
     printf("PUBLISH %s %s\n", AGENT_CHANNEL, buffer);
 
   char command[64];
@@ -118,6 +131,30 @@ static void publish_agent_telemetry(char* buffer, int bufi) {
     freeReplyObject(reply);
   }
 
+}
+
+static void add_srcip_count(double network_time, const char* srcip) {
+  // Add to event cache. Flushed when we dump per second stats
+  int now = (int)network_time;
+  uint8_t Index[256];
+  strcpy((char*)Index, srcip);
+  struct IP_Info* info = NULL;
+  PWord_t PV = NULL;
+  pthread_mutex_lock(&timer_lock);
+  COUNT_CNT++;
+  JSLG(PV, COUNT_CACHE, Index);
+  if (PV != NULL) {
+    info = (struct IP_Info*)*PV;
+    info->cnt++;
+    COUNT_TOTAL++;
+  } else {
+    info = (struct IP_Info*)malloc(sizeof(struct IP_Info));
+    info->first_issued = now;
+    info->cnt = 1;
+    JSLI(PV, COUNT_CACHE, Index);
+    *PV = (long)info;
+  }
+  pthread_mutex_unlock(&timer_lock);
 }
 
 static void add_srcip(double network_time, const char* proto, const char* srcip, uint port) {
@@ -223,7 +260,7 @@ static void flush_srcip_cache(double network_time) {
 
 static Word_t flush_agent_cache(double network_time) {
 
-  // Emit 32K msg(s) at a time.                                                                                                                        
+  // Emit 32K of msg telemetry at a time
   uint8_t key[256];
   char buffer[32*1024];
   uint bufi = 0;
@@ -292,6 +329,13 @@ static Word_t flush_agent_cache(double network_time) {
   return reqs;
 }
 
+static Word_t flush_count_cache(double network_time) {
+
+  // NOT IMPL YET. 
+  return 0;
+}
+
+
 static void redis_flush() {
 
   // ------------------------------------------------------------                                                                                      
@@ -301,6 +345,8 @@ static void redis_flush() {
   double start = current_time();
   flush_srcip_cache(start);
   Word_t reqs = flush_agent_cache(start);
+  if (COUNT_TRACK)
+    flush_count_cache(start);
 
   // Emit health heartbeat                                                                                                                             
   if (REDIS != NULL) {
@@ -361,6 +407,9 @@ static void parse_packet(u_char *user, struct pcap_pkthdr *packethdr, u_char *pa
     int port = ntohs(tcphdr->source);
     // if (DEBUG) printf("TCP  %s:%d\n", srcip, ntohs(tcphdr->source));
     add_srcip(start, "TCP", srcip, port);
+    if (COUNT_TRACK)
+      add_srcip_count(start, srcip);
+
     if (AGENT_TRACK && ntohs(tcphdr->dest) == 80) {
       // Until we can crack the agent header ... substitute one for now
       add_user_agent(start, srcip, ntohs(iphdr->ip_id), iphdr->ip_tos, iphdr->ip_ttl, port, "unknown");
@@ -375,16 +424,17 @@ static void parse_packet(u_char *user, struct pcap_pkthdr *packethdr, u_char *pa
 
 static void usage(const char* program, const char* default_filter) {
   printf("usage: %s [-h] [-a CHANNEL] [-c CHANNEL] [-d] -i INTERFACE [filter...]\n", program);
-  printf("  [-a CHANNEL] enable user agent tracking (partially working) and channel [default 'ua', applies only to tcp port 80\n");
-  printf("  [-c CHANNEL] pubsub channel, defaults to 'srcip'\n");
-  printf("  [-d] debug output\n");
+  printf("  [-a CHANNEL] - enable user agent tracking (partially working) and channel, ONLY applies to 'tcp port 80'\n");
+  printf("  [-c CHANNEL] - pubsub channel, defaults to 'srcip'\n");
+  printf("  [-d]         - debug output\n");
+  printf("  [-h]         - show this help message\n");
+  printf("  [-k CHANNEL] - enable client kount tracking and channel\n");
+  printf("  [-s SERVER]  - change the server (defaults to 127.0.0.1)\n");
   printf("  [filter...] %s\n", default_filter);
 }
 
 static void endprocess(int signo) {
-  printf("exiting\n");
   pcap_close(pd);
-  printf("exiting\n");
   redis_term();
   exit(0);
 }
@@ -394,7 +444,7 @@ int main(int argc, char **argv) {
   char interface[256] = "", filter[256] = "tcp port 80 and tcp[13] == 2";
   int packets = 0, c;
   // Get the command line options, if any
-  while ((c = getopt (argc, argv, "a:c:dhi:")) != -1) {
+  while ((c = getopt (argc, argv, "a:c:dhi:k:s:")) != -1) {
     switch (c)
       {
       case 'a':
@@ -414,6 +464,13 @@ int main(int argc, char **argv) {
       case 'i':
 	strcpy(interface, optarg);
 	break;
+      case 'k':
+	COUNT_TRACK = 1;
+	strcpy(COUNT_CHANNEL, optarg);
+	break;
+      case 's':
+	strcpy(REDIS_SERVER, optarg);
+	break;
       }
   }
 
@@ -432,7 +489,7 @@ int main(int argc, char **argv) {
   }
   if (custom_filter[0] != 0) strcpy(filter, custom_filter);
 
-  printf("CHANNEL=%s DEBUG=%d FILTER='%s'\n", SRCIP_CHANNEL, DEBUG, filter); 
+  printf("REDIS=%s SRCIP_CHANNEL='%s' COUNT_CHANNEL='%s' AGENT_CHANNEL='%s' DEBUG=%d FILTER='%s'\n", REDIS_SERVER, SRCIP_CHANNEL, COUNT_CHANNEL, AGENT_CHANNEL, DEBUG, filter); 
   if (AGENT_TRACK) 
     printf("AGENT enabled, CHANNEL=%s\n", AGENT_CHANNEL);
 
