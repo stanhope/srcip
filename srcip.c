@@ -32,7 +32,6 @@ int     AGENT_TRACK = 0;
 char    AGENT_CHANNEL[64] = "";
 
 struct AgentInfo {
-  uint first_issued;
   uint cnt;
   uint total;
 };
@@ -44,7 +43,6 @@ Word_t  COUNT_CNT = 0;
 Word_t  COUNT_TOTAL = 0;
 
 struct IP_Info {
-  uint first_issued;
   uint cnt;
   uint total;
 };
@@ -135,7 +133,6 @@ static void publish_agent_telemetry(char* buffer, int bufi) {
 
 static void add_srcip_count(double network_time, const char* srcip) {
   // Add to event cache. Flushed when we dump per second stats
-  int now = (int)network_time;
   uint8_t Index[256];
   strcpy((char*)Index, srcip);
   struct IP_Info* info = NULL;
@@ -146,10 +143,8 @@ static void add_srcip_count(double network_time, const char* srcip) {
   if (PV != NULL) {
     info = (struct IP_Info*)*PV;
     info->cnt++;
-    COUNT_TOTAL++;
   } else {
     info = (struct IP_Info*)malloc(sizeof(struct IP_Info));
-    info->first_issued = now;
     info->cnt = 1;
     JSLI(PV, COUNT_CACHE, Index);
     *PV = (long)info;
@@ -157,17 +152,17 @@ static void add_srcip_count(double network_time, const char* srcip) {
   pthread_mutex_unlock(&timer_lock);
 }
 
-static void add_srcip(double network_time, const char* proto, const char* srcip, uint port) {
-  // Add to event cache. Flushed when we dump per second stats
-  char* val = (char*)malloc(256);
-  sprintf(val, "%f,%s,%s,%d", network_time, proto, srcip, port);
+static void add_srcip(double network_time, const char* proto, const char* srcip, uint port, uint id) {
+  // Add to event cache. Flushed when we dump per second stats. We always use an increasing Word_t as the index into the array
+  // for this to avoid collisions.
+  char temp[256];
+  sprintf(temp, "%f,%s,%s,%u,%u", network_time, proto, srcip, port, id);
+  char* val = (char*)malloc(strlen(temp));
+  strcpy(val, temp);
   PWord_t PV = NULL;
   pthread_mutex_lock(&timer_lock);
   ++SRCIP_COUNT;
-  JError_t J_Error;
-  if (((PV) = (PWord_t)JudyLIns(&SRCIP_CACHE, SRCIP_COUNT, &J_Error)) == PJERR) {
-    J_E("JudyLIns", &J_Error);
-  }
+  JLI(PV, SRCIP_CACHE, SRCIP_COUNT);
   *PV = (Word_t)val;
   pthread_mutex_unlock(&timer_lock);
 }
@@ -331,8 +326,80 @@ static Word_t flush_agent_cache(double network_time) {
 
 static Word_t flush_count_cache(double network_time) {
 
-  // NOT IMPL YET. 
-  return 0;
+  // Emit 32K of msg telemetry at a time
+  uint8_t key[256];
+  char buffer[32*1024];
+  uint bufi = 0;
+  // Dump cached events and publish them                                                                                                               
+  Word_t cache_count = 0;
+  PWord_t PV = NULL;
+
+  if (COUNT_CNT > 0) {
+
+    // Init for publishing.                                                                                                                            
+    sprintf(buffer, "PUBLISH %s ", COUNT_CHANNEL);
+    bufi = strlen(buffer);
+    buffer[bufi] = 0;
+
+    pthread_mutex_lock(&timer_lock);
+    COUNT_TOTAL += COUNT_CNT;
+    COUNT_CNT = 0;
+    pthread_mutex_unlock(&timer_lock);
+
+    key[0] = 0;
+    JSLF(PV, COUNT_CACHE, key);
+    while (PV != NULL) {
+      cache_count++;
+      struct IP_Info *info = (struct IP_Info*)*PV;
+      fprintf(stderr, "  IP_Info[%s].cnt=%d\n", key, info->cnt);                                                                                               
+      // Don't report if we've got 0 hits in this cycle for this IP
+      if (info->cnt > 0) {
+        char agent_info[512];
+        sprintf(agent_info, "%f,UA,'%s',%d,%d", network_time, key, info->cnt, info->total);
+        size_t len = strlen(agent_info);
+
+        if ((bufi + len) > sizeof(buffer)) {
+	  if (REDIS != NULL) {
+	    redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
+	    freeReplyObject(reply);
+	  }
+	  sprintf(buffer, "PUBLISH %s ", COUNT_CHANNEL);
+	  bufi = strlen(buffer);
+	  buffer[bufi] = 0;
+        }
+
+        // Get ready for the next item, if we've already got an item, add delimeter                                                                    
+        if (bufi > 20) {
+          buffer[bufi++] = '|';
+        }
+
+        pthread_mutex_lock(&timer_lock);
+
+        char telemetry[512];
+        info->total += info->cnt;
+        sprintf(telemetry, "%f,IP,'%s',%d,%d", network_time, key, info->cnt, info->total);
+        size_t linelen = strlen(telemetry);
+        memcpy(buffer+bufi, telemetry, linelen);
+        bufi += linelen;
+        buffer[bufi] = 0;
+	// Not freeing up memory ... could exhaust if we get exhausted by spoofed set of SRCIPs.
+	// Reset count to 0 for next cycle
+        info->cnt = 0;
+        pthread_mutex_unlock(&timer_lock);
+      }
+      JSLN(PV, COUNT_CACHE, key);
+    }
+
+    if (DEBUG) printf("%s\n", buffer);
+
+    if (REDIS != NULL) {
+      redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
+      freeReplyObject(reply);
+    }
+
+  }
+
+  return cache_count;
 }
 
 
@@ -406,7 +473,7 @@ static void parse_packet(u_char *user, struct pcap_pkthdr *packethdr, u_char *pa
     struct tcphdr* tcphdr = (struct tcphdr*)packetptr;
     int port = ntohs(tcphdr->source);
     // if (DEBUG) printf("TCP  %s:%d\n", srcip, ntohs(tcphdr->source));
-    add_srcip(start, "TCP", srcip, port);
+    add_srcip(start, "TCP", srcip, port, ntohs(iphdr->ip_id));
     if (COUNT_TRACK)
       add_srcip_count(start, srcip);
 
@@ -418,7 +485,7 @@ static void parse_packet(u_char *user, struct pcap_pkthdr *packethdr, u_char *pa
   else if (iphdr->ip_p == IPPROTO_UDP) {
     struct udphdr* udphdr = (struct udphdr*)packetptr;
     // if (DEBUG) printf("UDP  %s:%d\n", srcip, ntohs(udphdr->source));
-    add_srcip(start, "UDP", srcip, ntohs(udphdr->source));
+    add_srcip(start, "UDP", srcip, ntohs(udphdr->source), ntohs(iphdr->ip_id));
   }
 }
 
