@@ -138,6 +138,7 @@ int redisKeepAlive(redisContext *c, int interval) {
         return REDIS_ERR;
     }
 #else
+/*
 #ifndef __sun
     val = interval;
     if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &val, sizeof(val)) < 0) {
@@ -158,6 +159,7 @@ int redisKeepAlive(redisContext *c, int interval) {
         return REDIS_ERR;
     }
 #endif
+*/
 #endif
 
     return REDIS_OK;
