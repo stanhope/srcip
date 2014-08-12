@@ -105,7 +105,7 @@ void addr_to_ascii( in_addr_t addr, int prefix, char* buf, int len ) {
 
 }
 
-int get_ranges( in_addr_t addr, int prefix, in_addr_t lo, in_addr_t hi, char* ranges[], uint len, uint* total ) {
+int get_ranges( in_addr_t addr, int prefix, in_addr_t lo, in_addr_t hi, char* ranges[], unsigned int len, unsigned int* total ) {
 
   in_addr_t bc, lower_half, upper_half;
   if ((prefix < 0) || (prefix > 32)) {

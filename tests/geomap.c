@@ -24,7 +24,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "Judy.h"
-#include "patricia.h"
+// #include "patricia.h"
 #include "iprange.h"
 #include "libcidr.h"
 #include "hiredis.c"
@@ -93,7 +93,7 @@ struct GeoInfo{
   char country[8];		/* This is based on analysis of GeoIP CSV from MaxMind May 2014 */
   char region[7];		/* Of course this is dangerous to assume it will remain this way */
   char city[38];
-  uint prefix_cnt;
+  unsigned int prefix_cnt;
   char prefixes[62*19];
 };
 
@@ -103,7 +103,7 @@ Pvoid_t GEOIP_SL = NULL;
 Pvoid_t ASNIP_SL = NULL;
 Pvoid_t CHECKIP_CNT_SL = NULL;
 
-uint load_geoip(char* file, Pvoid_t *arraySL) {
+unsigned int load_geoip(char* file, Pvoid_t *arraySL) {
   int       fd;               // to read file.
   struct stat statbuf;        // to get size of file
   char     *Pfile;            // ram address of file
@@ -231,7 +231,7 @@ uint load_geoip(char* file, Pvoid_t *arraySL) {
 	  in_addr_t lo = network( netaddr.addr, netaddr.pfx );
 	  netaddr = str_to_netaddr(addrhi);
 	  in_addr_t hi = broadcast( netaddr.addr, netaddr.pfx );
-	  uint cnt = 0;
+	  unsigned int cnt = 0;
 	  cnt = get_ranges( 0, 0, lo, hi, ranges, 70, &cnt );
 	  for (x = 0; x<cnt;x++) {
 	    if (ranges[x] != NULL) {
@@ -272,7 +272,7 @@ struct AsnInfo{
 };
 
 
-uint load_asnip(char* file, Pvoid_t *arraySL) {
+unsigned int load_asnip(char* file, Pvoid_t *arraySL) {
   int       fd;               // to read file.
   struct stat statbuf;        // to get size of file
   char     *Pfile;            // ram address of file
@@ -422,7 +422,7 @@ int compare_asninfo( const void* _a, const void* _b)
   else return 1;
 }
 
-uint load_checkip_counts(char* file, Pvoid_t *arrayL) {
+unsigned int load_checkip_counts(char* file, Pvoid_t *arrayL) {
   int       fd;               // to read file.
   struct stat statbuf;        // to get size of file
   char     *Pfile;            // ram address of file
@@ -966,7 +966,7 @@ void flush_stats(int onexit) {
     if (info->resource_cnt == info->telemetry_cnt) {
       // printf("----------\n%s\t%15s\t%15s\tibc=%d%d%d\t%d\t%d\n", BeaconIndex, info->recursiveip, info->clientip, info->inject, info->beacon, info->collect, info->resource_cnt, info->telemetry_cnt);
       printf("----------\n%s\t%15s\t%15s\n", BeaconIndex, info->recursiveip, info->clientip);
-      uint x, i;
+      unsigned int x, i;
       double min_durs[2];
       int min_oids[2];
       int rid_sizes[2];
@@ -978,7 +978,7 @@ void flush_stats(int onexit) {
 	int min_oid = -1;
 	int rid_size = -1;
 	for (x = 0; x < info->resource_cnt/2; x++) {
-	  uint idx = i * (info->resource_cnt/2) + x;
+	  unsigned int idx = i * (info->resource_cnt/2) + x;
 	  if (info->durations[idx] < min_dur) {
 	    min_dur = info->durations[idx];
 	    min_oid = info->oids[idx];
