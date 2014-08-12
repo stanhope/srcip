@@ -95,13 +95,18 @@ static double current_time()
 
 char REDIS_SERVER[64] = "127.0.0.1";
 
+int SHUTDOWN = 0;
+
 static void flush_stats();
 
 void* redis_timer (void * args) {
   while(1) {
     sleep (1);
-    flush_stats();
+    if (!SHUTDOWN) {
+      flush_stats();
+    }
   }
+  return NULL;
 }
 
 static void redis_init() {
@@ -186,7 +191,7 @@ static void add_srcip(long int sec, long int usec, const char* proto, const char
   pthread_mutex_unlock(&timer_lock);
 }
 
-static void flush_srcip_cache(double network_time, int debug, int dump) {
+static void flush_srcip_cache(double network_time, int debug, int dump, FILE* f) {
   char buffer[32*MAXLINELEN];
 
   pthread_mutex_lock(&timer_lock);
@@ -213,26 +218,27 @@ static void flush_srcip_cache(double network_time, int debug, int dump) {
       const char* val = (const char*)*PV;
 
       if (dump)
-	printf("%s\n", val);
+	fprintf(f != NULL ? f : stderr, "%s\n", val);
+      else {
+	uint len = strlen(val);
+	if (bufi + len > sizeof(buffer)) {
+	  if (REDIS != NULL) {
+	    redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
+	    freeReplyObject(reply);
+	  }
+	  sprintf(buffer, "PUBLISH %s ", SRCIP_CHANNEL);
+	  bufi = strlen(buffer);
+	  buffer[bufi] = 0;
+	} 
 
-      uint len = strlen(val);
-      if (bufi + len > sizeof(buffer)) {
-	if (REDIS != NULL) {
-	  redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
-	  freeReplyObject(reply);
+	// Cache the value
+	if (bufi > 30) {
+	  buffer[bufi++] = '|';
 	}
-	sprintf(buffer, "PUBLISH %s ", SRCIP_CHANNEL);
-	bufi = strlen(buffer);
+	memcpy(buffer+bufi, val, len);
+	bufi += len;
 	buffer[bufi] = 0;
-      } 
-
-      // Cache the value
-      if (bufi > 30) {
-	buffer[bufi++] = '|';
       }
-      memcpy(buffer+bufi, val, len);
-      bufi += len;
-      buffer[bufi] = 0;
 
       // Get next key
       JLN(PV, SRCIP_CACHE, Key);
@@ -479,7 +485,8 @@ static Word_t flush_agent_cache(double network_time, int debug, int dump, FILE* 
   uint8_t key[MAXLINELEN];
   char buffer[32*MAXLINELEN];
   
-  pthread_mutex_lock(&timer_lock);
+  if (!SHUTDOWN)
+    pthread_mutex_lock(&timer_lock);
 
   // Dump cached events and publish them                                                                                                               
   PWord_t PV = NULL;
@@ -490,7 +497,8 @@ static Word_t flush_agent_cache(double network_time, int debug, int dump, FILE* 
     uint bufi = 0;
     // Init for publishing.                                                                                                                            
     buffer[bufi] = 0;
-    reqs = AGENT_CNT;
+    if (!dump)
+      reqs = AGENT_CNT;
 
     key[0] = '\0';
 
@@ -503,6 +511,7 @@ static Word_t flush_agent_cache(double network_time, int debug, int dump, FILE* 
 
       if (dump) {
 	Word_t unique_count;
+	reqs++;
 	J1C(unique_count, info->unique, 0, -1);
 	fprintf(f != NULL ? f : stderr, "%d\t%lu\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t'%s'\n", info->total, unique_count, info->freq[0], info->freq[1], info->freq[2], info->freq[3], info->freq[4], info->freq[5], info->freq[6], info->freq[7], info->freq[8], info->freq[9], key);
       } 
@@ -557,7 +566,13 @@ static Word_t flush_agent_cache(double network_time, int debug, int dump, FILE* 
   AGENT_NEW = 0;
   AGENT_PRV = 0;
   AGENT_CNT = 0;
-  pthread_mutex_unlock(&timer_lock);
+
+  if (f != NULL) {
+    fflush(f);
+  }
+
+  if (!SHUTDOWN)
+    pthread_mutex_unlock(&timer_lock);
 
   return reqs;
 }
@@ -633,11 +648,13 @@ Word_t flush_count_cache(double network_time, int debug, int dump, FILE* f) {
   uint8_t key[256];
   char buffer[32*MAXLINELEN];
 
-  pthread_mutex_lock(&timer_lock);
+  if (!SHUTDOWN)
+    pthread_mutex_lock(&timer_lock);
+
   uint bufi = 0;
   // Dump cached events and publish them                                                                                                               
   PWord_t PV = NULL;
-  Word_t result = COUNT_CNT;
+  Word_t result = 0; // COUNT_CNT;
 
   if (COUNT_CNT > 0 || dump) {
 
@@ -670,6 +687,7 @@ Word_t flush_count_cache(double network_time, int debug, int dump, FILE* f) {
 	struct in_addr addr;
 	addr.s_addr = key32;
 	fprintf(f != NULL ? f : stderr ,"%d\t%s\n", info->total, inet_ntoa(addr));
+	++result;
       }
       else if (info->cnt > 0) {
 
@@ -731,9 +749,14 @@ Word_t flush_count_cache(double network_time, int debug, int dump, FILE* f) {
     COUNT_NEW = 0;
     COUNT_PRV = 0;
     COUNT_CNT = 0;
+  } 
+
+  if (f != NULL) {
+    fflush(f);
   }
 
-  pthread_mutex_unlock(&timer_lock);
+  if (!SHUTDOWN)
+    pthread_mutex_unlock(&timer_lock);
 
   return result;
 }
@@ -746,7 +769,7 @@ static void flush_stats() {
   double start = current_time();
 
   if (SRCIP_TRACK)
-    flush_srcip_cache(start, DEBUG, 0);
+    flush_srcip_cache(start, DEBUG, 0, 0);
   
   if (AGENT_TRACK)
     flush_agent_cache(start, DEBUG, 0, 0);
@@ -998,8 +1021,6 @@ static uint request_user_agent(const u_char *req, const uint pktlen, char* ua, u
   return 2;
 }
 
-int SHUTDOWN = 0;
-
 static void parse_packet(u_char *user, const struct pcap_pkthdr *packethdr, const u_char *packetptr) {
 
   if (SHUTDOWN) return;
@@ -1108,6 +1129,8 @@ static void parse_packet(u_char *user, const struct pcap_pkthdr *packethdr, cons
   }
 }
 
+char NODE[10] = "node";
+
 static void usage(const char* program, const char* default_filter) {
   printf("usage: %s [-h] [-a CHANNEL] [-c CHANNEL] [-d] -i INTERFACE [filter...]\n", program);
   printf("  [-a CHANNEL] - enable user agent tracking (partially working) and channel, ONLY applies to 'tcp port 80'\n");
@@ -1116,6 +1139,7 @@ static void usage(const char* program, const char* default_filter) {
   printf("  [-f FILTER]  - agent filter, defaults to ''\n");
   printf("  [-D]         - debug output\n");
   printf("  [-h]         - show this help message\n");
+  printf("  [-n]         - node name, used for constructing export file names\n");
   printf("  [-s SERVER]  - change the server (defaults to 127.0.0.1)\n");
   printf("  [-t ALGO]    - change the count algorithm (judy | redblack | hash)\n");
   printf("  [filter...] %s\n", default_filter);
@@ -1126,7 +1150,7 @@ static void dumpdata(int signo) {
   printf("\n");
   if (SRCIP_TRACK) {
     printf("--- SrcIP Dump Total=%lu----\n", SRCIP_COUNT);
-    flush_srcip_cache(0, 0, 1);
+    flush_srcip_cache(0, 0, 1, 0);
   }
   if (AGENT_TRACK) {
     printf("--- Agent Dump %lu----\n", AGENT_UNIQUE);
@@ -1143,24 +1167,29 @@ int DUMP_TO_FILE = 1;
 static void endprocess(int signo) {
 
   if (!SHUTDOWN) {
+    printf("ENDPROCESS %d\n", signo);fflush(stdout);
     // Global that stops packet processing (see parse_packet above)
     SHUTDOWN = 1;
-
+	
     // Dump the agent and srcip caches
     printf("\n");
 
     if (AGENT_TRACK) {
-      printf("--- Agent Dump Unique=%lu Total=%lu----\n", AGENT_UNIQUE, AGENT_TOTAL);
+      printf("--- Agent Dump Unique=%lu Total=%lu----\n", AGENT_UNIQUE+AGENT_NEW, AGENT_TOTAL+AGENT_CNT);
       if (DUMP_TO_FILE) {
 	char timestr[256];
 	time_t t = time(NULL);
 	strftime(timestr, sizeof(timestr), "%Y%m%d%H%M", gmtime(&t));
 	char fname[256];
-	sprintf(fname, "agents_%s.csv", timestr);
+	sprintf(fname, "%s-agents-%s.csv", NODE, timestr);
 	printf("Writing to file %s\n", fname);
+        fflush(stdout);
 	FILE* f = fopen(fname, "w");
-	flush_agent_cache(0, 0, 1, f);
+	Word_t result = flush_agent_cache(0, 0, 1, f);
+	fflush(f);
 	fclose(f);
+	printf("Wrote %lu unique Agents\n", result);
+        fflush(stdout);
       } else {
 	flush_agent_cache(0, 0, 1, 0);
       }
@@ -1168,16 +1197,22 @@ static void endprocess(int signo) {
 
     if (COUNT_TRACK) {
       if (DUMP_TO_FILE) {
-	printf("--- Count Dump %lu----\n", COUNT_UNIQUE);
+	printf("--- Count Dump %lu----\n", COUNT_UNIQUE+COUNT_NEW);
 	char timestr[256];
 	time_t t = time(NULL);
 	strftime(timestr, sizeof(timestr), "%Y%m%d%H%M", gmtime(&t));
 	char fname[256];
-	sprintf(fname, "counts_%s.csv", timestr);
+	sprintf(fname, "%s-counts-%s.csv", NODE,timestr);
 	printf("Writing to file %s\n", fname);
+	fflush(stdout);
+	// pthread_mutex_lock(&timer_lock);
 	FILE* f = fopen(fname, "w");
-	flush_count_cache(0, 0, 1, f);
+	Word_t result = flush_count_cache(0, 0, 1, f);
+	fflush(f);
 	fclose(f);
+	printf("Wrote %lu unique IPs\n", result);
+        fflush(stdout);
+	// pthread_mutex_unlock(&timer_lock);
       } else {
 	printf("--- Count Dump %lu----\n", COUNT_TOTAL);
 	flush_count_cache(0, 0, 1, 0);
@@ -1185,17 +1220,36 @@ static void endprocess(int signo) {
     }
     
     if (SRCIP_TRACK) {
-      printf("--- SrcIP Dump %lu----\n", SRCIP_COUNT);
-      flush_srcip_cache(0, 0, 1);
+      if (DUMP_TO_FILE) {
+	printf("--- SrcIP Dump %lu----\n", SRCIP_COUNT);
+	char timestr[256];
+	time_t t = time(NULL);
+	strftime(timestr, sizeof(timestr), "%Y%m%d%H%M", gmtime(&t));
+	char fname[256];
+	sprintf(fname, "%s-srcip-%s.csv", NODE,timestr);
+	printf("Writing to file %s\n", fname);
+	FILE* f = fopen(fname, "w");
+	flush_srcip_cache(0, 0, 1, f);
+	fflush(f);
+	fclose(f);
+      } else {
+	flush_srcip_cache(0, 0, 1, 0);
+      }
     }
 
+    printf("Closing REDIS connection (if one is available)\n");
+    fflush(stdout);
     redis_term();
 
-    // On Ubuntu 12.04 with 3.11 kernel ... getting a double free or corruption error when closing the PCAP.
+    printf("Closing pcap\n");
+    fflush(stdout);
     pcap_close(pd);
+
+    exit(0);
+  } else {
+    printf("Ignoring SIGINT, still shutting down\n");
   }
 
-  exit(0);
 }
 
 TREEREC* rbfirst(ANSREC *ans) {
@@ -1219,7 +1273,7 @@ int main(int argc, char **argv) {
   int packets = 0, c;
 
   // Get the command line options, if any
-  while ((c = getopt (argc, argv, "Aa:c:d:Df:hi:s:t:")) != -1) {
+  while ((c = getopt (argc, argv, "Aa:c:d:Df:hi:n:s:t:")) != -1) {
     switch (c)
       {
       case 'A':
@@ -1251,6 +1305,9 @@ int main(int argc, char **argv) {
 	break;
       case 'i':
 	strcpy(interface, optarg);
+	break;
+      case 'n':
+	strcpy(NODE, optarg);
 	break;
       case 's':
 	strcpy(REDIS_SERVER, optarg);
@@ -1293,7 +1350,7 @@ int main(int argc, char **argv) {
   if (AGENT_TRACK) 
     printf("AGENT enabled, CHANNEL=%s\n", AGENT_CHANNEL);
   if (COUNT_TRACK) 
-    printf("COUNT enabled, CHANNEL=%s\n", AGENT_CHANNEL);
+    printf("COUNT enabled, CHANNEL=%s\n", COUNT_CHANNEL);
 
   // Get the pcap flowing
   if ((pd = open_pcap(interface, filter))) {
@@ -1302,9 +1359,11 @@ int main(int argc, char **argv) {
     redis_init();
 
     signal(SIGINT, endprocess);
-    signal(SIGTERM, endprocess);
-    signal(SIGQUIT, endprocess);
+//    signal(SIGTERM, endprocess);
+//    signal(SIGQUIT, endprocess);
 #ifdef FREEBSD
+    //    signal(SIGTERM, endprocess);
+    //    signal(SIGQUIT, endprocess);
     signal(SIGINFO, dumpdata);
 #else
     signal(SIGUSR1, dumpdata);
@@ -1340,6 +1399,8 @@ int main(int argc, char **argv) {
     if (pcap_loop(pd, packets, (pcap_handler)parse_packet, 0) < 0)
       printf("pcap_loop failed: %s\n", pcap_geterr(pd));
 
+    printf("Capture complete, done\n");
+    fflush(stdout);
     endprocess(0);
   }
   exit(0);
