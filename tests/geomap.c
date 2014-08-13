@@ -748,7 +748,7 @@ void dump_geo_asn_info(char* testip) {
       struct AsnInfo *asninfo = (struct AsnInfo*)*PValue;
       asnid = asninfo->asn;
     }
-    printf(" => %15s\t%08x - %08x\t%15s - %15s\t%s %s ASN=%d\n", AsnIndex, *(uint32_t*)&geoinfo->lo, *(uint32_t*)&geoinfo->hi, addrlo, addrhi, geoinfo->country, geoinfo->region, asnid);
+    printf(" => %18s\tASN=%d,%s,%s\t%08x - %08x\t%15s - %15s\n", AsnIndex, asnid, geoinfo->country, geoinfo->region, *(uint32_t*)&geoinfo->lo, *(uint32_t*)&geoinfo->hi, addrlo, addrhi);
     if (is_covered) {
       printf("  Covered by range %s ... %s %s %s ASN=%d\n", 
 	     coverlo, coverhi, 
@@ -763,12 +763,12 @@ void msgCallback(redisAsyncContext *c, void *reply, void *privdata) {
   pthread_mutex_lock(&timer_lock);
   if (reply == NULL) return;
   redisReply *r = reply;
-  printf("msgCallback %s...", (char*)c->data);
   if (r->type == REDIS_REPLY_ARRAY) {
     if (r->elements >= 3) {
       // 3rd element is the message body
       char tmp[64*1024];
       if (r->element[2]->str != NULL) {
+	// int mlen = strlen(r->element[2]->str); printf("%d ", mlen);
 	strncpy(tmp, r->element[2]->str, sizeof(tmp));
 	char* linesave;
 	char* line = strtok_r(tmp, "|", &linesave);
@@ -899,14 +899,20 @@ void msgCallback(redisAsyncContext *c, void *reply, void *privdata) {
 		  char* t2fb = strtok_r(NULL, ",", &save);
 		  char* t2lb = strtok_r(NULL, ",", &save);
 		  char* duration = strtok_r(NULL, ",", &save);
-		  double dur = atof(duration);
-
-		  // printf("%s,%s,%s,%s,%s,%s\n", ts,msgtype,nodeid,clientip,beacon,save);
-		  uint32_t u32_rid = atoi(rid);
-		  uint32_t u32_oid = atoi(oid);
-		  info->durations[u32_rid-1] = dur;
-		  info->oids[u32_rid-1] = u32_oid;
-		  info->sizes[u32_rid-1] = atoi(size);
+		  if (t2lb == NULL || duration == NULL) {
+		    printf("WARN: %s\n", line);
+		    fflush(stdout);
+		  }
+		  else {
+		    // printf("t2lb=%s dur=%s ", t2lb, duration);
+		    double dur = strtod(duration,NULL);
+		    // printf("%s,%s,%s,%s,%s,%s\n", ts,msgtype,nodeid,clientip,beacon,save);
+		    uint32_t u32_rid = atoi(rid);
+		    uint32_t u32_oid = atoi(oid);
+		    info->durations[u32_rid-1] = dur;
+		    info->oids[u32_rid-1] = u32_oid;
+		    info->sizes[u32_rid-1] = atoi(size);
+		  }
 		  break;
 		}
 	      }
@@ -917,7 +923,6 @@ void msgCallback(redisAsyncContext *c, void *reply, void *privdata) {
       }
     }
   }
-  printf("...DONE\n");
   pthread_mutex_unlock(&timer_lock);
 }
 
@@ -965,7 +970,6 @@ void flush_stats(int onexit) {
     struct BeaconInfo *info = (struct BeaconInfo*)*PV;
     if (info->resource_cnt == info->telemetry_cnt) {
       // printf("----------\n%s\t%15s\t%15s\tibc=%d%d%d\t%d\t%d\n", BeaconIndex, info->recursiveip, info->clientip, info->inject, info->beacon, info->collect, info->resource_cnt, info->telemetry_cnt);
-      printf("----------\n%s\t%15s\t%15s\n", BeaconIndex, info->recursiveip, info->clientip);
       unsigned int x, i;
       double min_durs[2];
       int min_oids[2];
@@ -985,13 +989,25 @@ void flush_stats(int onexit) {
 	    rid_size = info->sizes[idx];
 	  }
 	}
-	printf("min=%f oid=%d size=%d\n", min_dur, min_oid, rid_size);
+	// printf("min=%f oid=%d size=%d\n", min_dur, min_oid, rid_size);
 	min_durs[i] = min_dur;
 	min_oids[i] = min_oid;
 	rid_sizes[i] = rid_size;
       }
+      char* result = "WINNER";
       if (min_oids[0] == min_oids[1]) {
-	printf("winner! oid=%d (%s) size=%d recursive=%s clientip=%s\n", min_oids[0], OID_TO_NAME(min_oids[0]), rid_sizes[0], info->recursiveip, info->clientip);
+
+	/*
+	JLG(PV, WINNER_INFO, addr.s_addr);
+	if (PV != NULL) {
+	  struct RecursiveInfo *info = (struct RecursiveInfo*)*PV;
+	  info->cnt++;
+	} else {
+	  // printf("%s,%s,%s,%s,%s\n", ts,msgtype,nodeid,clientip,beacon);
+	  struct RecursiveInfo *info = (struct RecursiveInfo*)malloc(sizeof(struct RecursiveInfo));
+	}
+	*/
+
 	if (info->recursiveip[0] != 0) {
 	  dump_geo_asn_info(info->recursiveip);
 	  dump_geo_asn_info(info->clientip);
@@ -999,8 +1015,11 @@ void flush_stats(int onexit) {
 	  dump_geo_asn_info(info->clientip);
 	}
       } else {
-	printf("no winner!\n");
+	result = "NO winner";
       }
+      printf("%s\t recursive=%s clientip=%s\n", "WINNER", info->recursiveip, info->clientip);
+      printf("  r1 %s min=%f oid=%d size=%d\n", OID_TO_NAME(min_oids[0]), min_durs[0], min_oids[0], rid_sizes[0]);
+      printf("  r2 %s min=%f oid=%d size=%d\n", OID_TO_NAME(min_oids[0]), min_durs[1], min_oids[1], rid_sizes[1]);
     }
     JSLN(PV, BEACON_INFO, BeaconIndex);
   }
@@ -1024,12 +1043,11 @@ void* beacon_timer (void * args) {
   while(1) {
     sleep (1);
     int now = (int)current_time();
-    printf("%d,%lu,%lu,%lu...", now, RECURSIVE_CNT, BEACON_CNT, BEACON_COMPLETE);
+    printf("%d,%lu,%lu,%lu\n", now, RECURSIVE_CNT, BEACON_CNT, BEACON_COMPLETE);
     if (now % 60 == 0) {
       printf("- Flushing Stats ------------\n");
       flush_stats(0);
     }
-    printf("\n");
   }
 }
 
