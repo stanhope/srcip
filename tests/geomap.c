@@ -93,6 +93,8 @@ struct GeoInfo{
   char country[8];		/* This is based on analysis of GeoIP CSV from MaxMind May 2014 */
   char region[7];		/* Of course this is dangerous to assume it will remain this way */
   char city[38];
+  double lat;
+  double lon;
   unsigned int prefix_cnt;
   char prefixes[62*19];
 };
@@ -156,11 +158,15 @@ unsigned int load_geoip(char* file, Pvoid_t *arraySL) {
 	  StrCnt++;
 	  continue;
 	}
-	char* iplo = strtok(String,",");
-	char* iphi = strtok(NULL, ",");
-	char* country = strtok(NULL, ",");
-	char* region = strtok(NULL, ",");
-	char* city = strtok(NULL, ",");
+	char* save;
+	char* iplo = strtok_r(String,",", &save);
+	char* iphi = strtok_r(NULL, ",", &save);
+	char* country = strtok_r(NULL, ",", &save);
+	char* region = strtok_r(NULL, ",", &save);
+	char* city = strtok_r(NULL, ",", &save);
+	char* postalcode = strtok_r(NULL, ",", &save);
+	char* lat = strtok_r(NULL, ",", &save);
+	char* lon = strtok_r(NULL, ",", &save);
 	// printf("%lu ", StrCnt);
 	struct in_addr addrlo, addrhi;
 	
@@ -178,6 +184,12 @@ unsigned int load_geoip(char* file, Pvoid_t *arraySL) {
 	strcpy(info->region, region);
 	strcpy(info->city, city);
 	strcpy((char*)Index, iplo);
+	if (lat != NULL) {
+	  info->lat = atof(lat);
+	  info->lon = atof(lon);
+	} else {
+	  printf("NO LAT/LON: %lu %s\n", StrCnt, String);
+	}
 	info->covered_prefix = NULL;
 	info->prefix_cnt = 0;
 	info->prefixes[0] = 0;
@@ -685,8 +697,10 @@ struct BeaconInfo {
   double ts;
   struct in_addr addr;
   char clientip[40];
+  struct in_addr recursiveip_addr;
   char recursiveip[40];
   uint32_t resource_cnt;
+  uint32_t unique_resources;
   uint32_t telemetry_cnt;
   char* telemetry;
   uint32_t mtype;
@@ -698,6 +712,7 @@ struct BeaconInfo {
   double* durations;
   uint32_t* oids;
   uint32_t* sizes;
+  uint32_t asn;
 };
 
 Pvoid_t BEACON_INFO = NULL;
@@ -714,6 +729,75 @@ Word_t  RECURSIVE_TOTAL = 0;
 Pvoid_t FLAP_INFO = NULL;
 
 pthread_mutex_t timer_lock=PTHREAD_MUTEX_INITIALIZER;
+
+struct GeoAsnInfo {
+  char ip[40];
+  char asn_prefix[40];
+  uint32_t asn;
+  char country[8];
+  char region[8];
+  double lat;
+  double lon;
+  struct in_addr geolo;
+  struct in_addr geohi;
+  struct in_addr asnlo;
+  struct in_addr asnhi;
+};
+
+int get_geo_asn_info(char* testip, struct GeoAsnInfo* geo_asn_info) {
+  uint8_t GeoIndex[40];
+  strcpy((char*)GeoIndex, testip);
+  network_addr_t netaddr = str_to_netaddr(testip);
+  in_addr_t lo = network( netaddr.addr, netaddr.pfx );
+  Word_t *PValue;
+  JSLL(PValue, GEOIP_SL, GeoIndex);
+  if (PValue != NULL) {
+    struct GeoInfo *geoinfo = (struct GeoInfo*)*PValue;
+    geo_asn_info->geolo = geoinfo->lo;
+    geo_asn_info->geohi = geoinfo->hi;
+    strcpy(geo_asn_info->country, geoinfo->country);
+    strcpy(geo_asn_info->region, geoinfo->region);
+    geo_asn_info->lat = geoinfo->lat;
+    geo_asn_info->lon = geoinfo->lon;
+
+    int is_covered = 0;
+    char coverlo[40], coverhi[40];
+    struct GeoInfo *covered_prefix;
+    int asnid = 0;
+    uint8_t  AsnIndex[40];  
+    if (geoinfo->covered_prefix != NULL) {
+      covered_prefix = (struct GeoInfo*)geoinfo->covered_prefix;
+      inet_ntop(AF_INET, &covered_prefix->lo, coverlo, sizeof coverlo);
+      inet_ntop(AF_INET, &covered_prefix->hi, coverhi, sizeof coverhi);
+      network_addr_t netaddrlo = str_to_netaddr(coverlo);
+      network_addr_t netaddrhi = str_to_netaddr(coverhi);
+      int greater_than_lo = compar_netaddr(&netaddr, &netaddrlo);
+      int less_than_hi = compar_netaddr(&netaddr, &netaddrhi);
+      is_covered = (greater_than_lo == 1) && (less_than_hi == -1);
+      if (is_covered) {
+	geo_asn_info->geolo = covered_prefix->lo;
+	geo_asn_info->geohi = covered_prefix->hi;
+	geo_asn_info->lat = covered_prefix->lat;
+	geo_asn_info->lon = covered_prefix->lon;
+	strcpy(geo_asn_info->country, covered_prefix->country);
+	strcpy(geo_asn_info->region, covered_prefix->region);
+      }
+    }
+
+    struct AsnInfo *asninfo = NULL;
+    strcpy((char*)AsnIndex, testip);
+    JSLL(PValue, ASNIP_SL, AsnIndex);
+    if (PValue != NULL) {
+      asninfo = (struct AsnInfo*)*PValue;
+      strcpy(geo_asn_info->asn_prefix, (char*)AsnIndex);
+      geo_asn_info->asn = asninfo->asn;
+      geo_asn_info->asnlo = asninfo->lo;
+      geo_asn_info->asnhi = asninfo->hi;
+    }
+    return 1;
+  }
+  return 0;
+}
 
 void dump_geo_asn_info(char* testip) {
   uint8_t GeoIndex[40];
@@ -742,24 +826,47 @@ void dump_geo_asn_info(char* testip) {
       int less_than_hi = compar_netaddr(&netaddr, &netaddrhi);
       is_covered = (greater_than_lo == 1) && (less_than_hi == -1);
     }
+
+    struct AsnInfo *asninfo = NULL;
     strcpy((char*)AsnIndex, testip);
     JSLL(PValue, ASNIP_SL, AsnIndex);
+    char asnlo[40], asnhi[40];
     if (PValue != NULL) {
-      struct AsnInfo *asninfo = (struct AsnInfo*)*PValue;
+      asninfo = (struct AsnInfo*)*PValue;
       asnid = asninfo->asn;
+      inet_ntop(AF_INET, &asninfo->lo, asnlo, sizeof asnlo);
+      inet_ntop(AF_INET, &asninfo->hi, asnhi, sizeof asnhi);
     }
-    printf(" => %18s\tASN=%d,%s,%s\t%08x - %08x\t%15s - %15s\n", AsnIndex, asnid, geoinfo->country, geoinfo->region, *(uint32_t*)&geoinfo->lo, *(uint32_t*)&geoinfo->hi, addrlo, addrhi);
+    // printf(" => PREFIX=%18s\tASN=%d,%s,%s\t%08x - %08x\t%15s - %15s\n", AsnIndex, asnid, geoinfo->country, geoinfo->region, *(uint32_t*)&geoinfo->lo, *(uint32_t*)&geoinfo->hi, addrlo, addrhi);
+    printf(" => %18s\tASN=%d,%s,%s\tGEO RANGE=%15s - %15s\tASN RANGE=%15s - %15s\n", AsnIndex, asnid, geoinfo->country, geoinfo->region, addrlo, addrhi, asnlo, asnhi);
     if (is_covered) {
       printf("  Covered by range %s ... %s %s %s ASN=%d\n", 
-	     coverlo, coverhi, 
-	     covered_prefix->country, covered_prefix->region, asnid);
+	     coverlo, coverhi, covered_prefix->country, covered_prefix->region, asnid);
     }
   } else {
     printf("Can't obtain GEO/ASN info\n");
   }
 }
 
+struct AsnInfo* get_asn(char* testip) {
+  Word_t *PValue;
+  struct AsnInfo *asninfo = NULL;
+  uint8_t AsnIndex[40];
+  strcpy((char*)AsnIndex, testip);
+  JSLL(PValue, ASNIP_SL, AsnIndex);
+  char asnlo[40], asnhi[40];
+  if (PValue != NULL) {
+    asninfo = (struct AsnInfo*)*PValue;
+  }
+  return asninfo;
+}
+
 void msgCallback(redisAsyncContext *c, void *reply, void *privdata) {
+  if (SHUTDOWN) {
+    redisAsyncDisconnect(c);
+    return;
+  }
+
   pthread_mutex_lock(&timer_lock);
   if (reply == NULL) return;
   redisReply *r = reply;
@@ -784,8 +891,9 @@ void msgCallback(redisAsyncContext *c, void *reply, void *privdata) {
 	  char* custdata = strtok_r(NULL, ",", &save);
 	  
 	  if (msgtype[0] == 'A') {
-	    if (strstr(beacon,"DNS_PULSE") != NULL)
+	    if (strstr(beacon,"DNS_PULSE") != NULL) {
 	      printf("%s,%s,%s,%s,%s\n", ts,msgtype,nodeid,clientip,beacon);
+	    }
 	  }
 	  else if (msgtype[0] == 'H') {
 	    // ignore
@@ -797,6 +905,8 @@ void msgCallback(redisAsyncContext *c, void *reply, void *privdata) {
 	    struct in_addr addr;
 	    inet_aton(clientip, (struct in_addr*)&addr.s_addr);
 
+	    struct RecursiveInfo *recursive_info = NULL;
+
 	    if (is_dns) {
 	      Word_t *PV;
 	      int RC_int;
@@ -805,26 +915,20 @@ void msgCallback(redisAsyncContext *c, void *reply, void *privdata) {
 
 	      JLG(PV, RECURSIVE_INFO, addr.s_addr);
 	      if (PV != NULL) {
-		struct RecursiveInfo *info = (struct RecursiveInfo*)*PV;
-		info->cnt++;
+		recursive_info = (struct RecursiveInfo*)*PV;
+		recursive_info->cnt++;
 	      } else {
 		// printf("%s,%s,%s,%s,%s\n", ts,msgtype,nodeid,clientip,beacon);
-		struct RecursiveInfo *info = (struct RecursiveInfo*)malloc(sizeof(struct RecursiveInfo));
-		info->addr.s_addr = addr.s_addr;
-		info->cnt = 1;
-		info->fast = 0;
-		info->slow = 0;
-		info->flap = 0;
+		recursive_info = (struct RecursiveInfo*)malloc(sizeof(struct RecursiveInfo));
+		recursive_info->addr.s_addr = addr.s_addr;
+		recursive_info->cnt = 1;
+		recursive_info->fast = 0;
+		recursive_info->slow = 0;
+		recursive_info->flap = 0;
 		RECURSIVE_CNT++;
-		strcpy(info->nodeid, nodeid);
-		if (strstr(nodeid, beacon_node) == NULL) {
-		  printf("DNS NODE flap detected recursive=%s node=%s beacon_node=%s beacon=%s\n", clientip, nodeid, beacon_node, beacon+5);
-		  strcpy(info->flap_from, beacon_node);
-		  dump_geo_asn_info(clientip);
-		  info->flap++;
-		}
+		strcpy(recursive_info->nodeid, nodeid);
 		JLI(PV, RECURSIVE_INFO, addr.s_addr);
-		*PV = (Word_t)info;
+		*PV = (Word_t)recursive_info;
 	      }
 	    }
 
@@ -836,15 +940,61 @@ void msgCallback(redisAsyncContext *c, void *reply, void *privdata) {
 	    if (PV != NULL) {
 	      info = (struct BeaconInfo*)*PV;
 	      if (is_dns) {
-		strcpy(info->recursiveip, clientip);
+		if (info->recursiveip_addr.s_addr != 0) {
+		  // Could see duplicate queries (A/AAAA), intentionally not filtered by analyzer
+		  if (addr.s_addr != info->recursiveip_addr.s_addr) {
+		    struct AsnInfo *asninfo_current = get_asn(clientip);
+		    printf("%s,%s,%s,%s,%s ASN=%d\n", ts,msgtype,nodeid,clientip,beacon, asninfo_current->asn);
+		    struct AsnInfo *asninfo_last = get_asn(info->recursiveip);
+		    printf("  DNS exists for this beacon! %s ASN=%d\n", info->recursiveip, asninfo_last->asn);
+		    if (asninfo_current->asn != asninfo_last->asn) {
+		      printf("  ASN mismatch %d != %d\n", asninfo_current->asn, asninfo_last->asn);
+		    }
+		  }
+		} else {
+		  strcpy(info->recursiveip, clientip);
+		  info->recursiveip_addr.s_addr = addr.s_addr;
+		  struct AsnInfo *asninfo = get_asn(clientip);
+		  printf("%s,%s,%s,%s,%s ASN=%d\n", ts,msgtype,nodeid,clientip,beacon, asninfo->asn);
+		}
+
+		if (strstr(nodeid, beacon_node) == NULL) {
+		  printf("  DNS FLAP cur=%s src=%s beacon=%s\n", nodeid, beacon_node, beacon);
+		  strcpy(recursive_info->flap_from, beacon_node);
+		  struct GeoAsnInfo geo_asn_info;
+		  // dump_geo_asn_info(clientip);
+		  get_geo_asn_info(clientip, &geo_asn_info);
+		  printf("  %s (%s) AS=%d %s %s %f %f\n", clientip, geo_asn_info.asn_prefix, geo_asn_info.asn, geo_asn_info.country, geo_asn_info.region, geo_asn_info.lat, geo_asn_info.lon);
+		  recursive_info->flap++;
+		  printf("----------------\n");
+		}
+
 	      }
 	      else {
 		strcpy(info->clientip, clientip);
+		info->addr.s_addr = addr.s_addr;
 	      }
 	    } else {
 	      info = (struct BeaconInfo*)malloc(sizeof(struct BeaconInfo));
-	      info->addr.s_addr = addr.s_addr;
+	      if (is_dns) {
+		info->recursiveip_addr.s_addr = addr.s_addr;
+		info->addr.s_addr = 0;
+		info->clientip[0] = 0;
+		strcpy(info->recursiveip, clientip);
+		struct AsnInfo *asninfo = get_asn(clientip);
+		info->asn = asninfo->asn;
+		printf("%s,%s,%s,%s,%s ASN=%d\n", ts,msgtype,nodeid,clientip,beacon, asninfo->asn);
+	      } else {
+		info->addr.s_addr = addr.s_addr;
+		info->recursiveip_addr.s_addr = 0;
+		info->recursiveip[0] = 0;
+		info->asn = 0;
+		strcpy(info->clientip, clientip);
+	      }
+
 	      info->nodeflap = 0;
+	      // Need to make this dynamic!
+	      info->unique_resources = 2;
 	      info->telemetry_cnt = 0;
 	      info->inject = info->beacon = info->collect = 0;
 	      strcpy(info->nodeid, nodeid);
@@ -861,14 +1011,6 @@ void msgCallback(redisAsyncContext *c, void *reply, void *privdata) {
 		info->durations[x] = 0;
 		info->oids[x] = 0;
 		info->sizes[x] = 0;
-	      }
-	      info->clientip[0] = 0;
-	      info->recursiveip[0] = 0;
-	      if (is_dns) {
-		strcpy(info->recursiveip, clientip);
-	      }
-	      else {
-		strcpy(info->clientip, clientip);
 	      }
 	      JSLI(PV, BEACON_INFO, Index);
 	      *PV = (Word_t)info;
@@ -926,15 +1068,32 @@ void msgCallback(redisAsyncContext *c, void *reply, void *privdata) {
   pthread_mutex_unlock(&timer_lock);
 }
 
+Pvoid_t WINNER_INFO = NULL;
+
+struct WinnerInfo {
+  uint32_t cnt;
+  uint32_t oid;
+  uint32_t last_oid;
+  uint32_t repeat;
+  unsigned int ts_first;
+  unsigned int ts_last;
+  struct in_addr recursive;
+  struct in_addr client;
+  struct in_addr client_last;
+  char beacon[40];
+  char nodeid[5];
+};
 
 void flush_stats(int onexit) {
   pthread_mutex_lock(&timer_lock);
 
   // Dump the recursive info
+  double now = current_time();
   printf("- RECURSIVES cnt=%lu total=%lu\n", RECURSIVE_CNT, RECURSIVE_TOTAL);
   Word_t Index = 0;
   Word_t *PV;
   if (onexit) {
+
     JLF(PV, RECURSIVE_INFO, Index);
     printf("  MOST RECENT ----\n");
     while (PV != NULL) {
@@ -957,6 +1116,31 @@ void flush_stats(int onexit) {
       printf("%08lx %15s\n", Index, addr_recursive);
       J1N(rc_int, RECURSIVE_UNIQUE, Index);
     }
+
+    // Dump all winners
+    Index = 0;
+    Word_t winner_cnt;
+    J1C(winner_cnt, WINNER_INFO, 0, -1);
+    printf("- Winners %lu ------------\n", winner_cnt);
+    JLF(PV, WINNER_INFO, Index);
+    int now = (int)current_time();
+    struct WinnerInfo *winner_info = NULL;
+    while (PV != NULL) {
+      winner_info = (struct WinnerInfo*)*PV;
+      char addr_recursive[40], addr_client[40];
+      inet_ntop(AF_INET, &winner_info->recursive, addr_recursive, sizeof addr_recursive);
+      inet_ntop(AF_INET, &winner_info->client, addr_client, sizeof addr_client);
+      printf("%15s %s node=%s cnt=%d repeat=%d oid=%d (%s) ts=%d age=%d\n", addr_recursive, winner_info->beacon, winner_info->nodeid, winner_info->cnt, winner_info->repeat, winner_info->oid, OID_TO_NAME(winner_info->oid), winner_info->ts_first, now - winner_info->ts_first);
+      struct GeoAsnInfo info_recursive;
+      get_geo_asn_info(addr_recursive, &info_recursive);
+      printf("  recurs=%15s (%18s) AS=%7d %s %s %f %f GEO lo=%08x hi=%08x\n", addr_recursive, info_recursive.asn_prefix, info_recursive.asn, info_recursive.country, info_recursive.region, info_recursive.lat, info_recursive.lon, info_recursive.geolo.s_addr, info_recursive.geohi.s_addr);
+      struct GeoAsnInfo info_client;
+      get_geo_asn_info(addr_client, &info_client);
+      printf("  client=%15s (%18s) AS=%7d %s %s %f %f GEO lo=%08x hi-%08x\n", addr_client, info_client.asn_prefix, info_client.asn, info_client.country, info_client.region, info_client.lat, info_client.lon, info_client.geolo.s_addr, info_client.geohi.s_addr);
+      printf("  --------\n");
+      JLN(PV, WINNER_INFO, Index);
+    }
+
   }
 
   JLFA(Index, RECURSIVE_INFO);
@@ -967,26 +1151,27 @@ void flush_stats(int onexit) {
   BeaconIndex[0] = 0;
   JSLF(PV, BEACON_INFO, BeaconIndex);
   while (PV != NULL) {
-    struct BeaconInfo *info = (struct BeaconInfo*)*PV;
-    if (info->resource_cnt == info->telemetry_cnt) {
-      // printf("----------\n%s\t%15s\t%15s\tibc=%d%d%d\t%d\t%d\n", BeaconIndex, info->recursiveip, info->clientip, info->inject, info->beacon, info->collect, info->resource_cnt, info->telemetry_cnt);
+    struct BeaconInfo *beacon_info = (struct BeaconInfo*)*PV;
+    if (beacon_info->resource_cnt == beacon_info->telemetry_cnt) {
+      // printf("----------\n%s\t%15s\t%15s\tibc=%d%d%d\t%d\t%d\n", BeaconIndex, beacon_info->recursiveip, beacon_info->clientip, beacon_info->inject, beacon_info->beacon, beacon_info->collect, beacon_info->resource_cnt, beacon_info->telemetry_cnt);
       unsigned int x, i;
-      double min_durs[2];
-      int min_oids[2];
-      int rid_sizes[2];
-      for (i = 0; i < 2; i++) {
+      double min_durs[beacon_info->unique_resources];
+      int min_oids[beacon_info->unique_resources];
+      int rid_sizes[beacon_info->unique_resources];
+      for (i = 0; i < beacon_info->unique_resources; i++) {
 	min_durs[i] = 0;
 	min_oids[i] = 0;
 	rid_sizes[i] = 0;
 	double min_dur = 1000000.0;
 	int min_oid = -1;
 	int rid_size = -1;
-	for (x = 0; x < info->resource_cnt/2; x++) {
-	  unsigned int idx = i * (info->resource_cnt/2) + x;
-	  if (info->durations[idx] < min_dur) {
-	    min_dur = info->durations[idx];
-	    min_oid = info->oids[idx];
-	    rid_size = info->sizes[idx];
+	for (x = 0; x < beacon_info->resource_cnt / beacon_info->unique_resources; x++) {
+	  unsigned int idx = i * (beacon_info->resource_cnt / beacon_info->unique_resources) + x;
+	  // printf("checking idx=%d oid=%d dur=%f size=%d\n", idx, beacon_info->oids[idx], beacon_info->durations[idx], beacon_info->sizes[idx]);
+	  if (beacon_info->durations[idx] < min_dur) {
+	    min_dur = beacon_info->durations[idx];
+	    min_oid = beacon_info->oids[idx];
+	    rid_size = beacon_info->sizes[idx];
 	  }
 	}
 	// printf("min=%f oid=%d size=%d\n", min_dur, min_oid, rid_size);
@@ -994,32 +1179,84 @@ void flush_stats(int onexit) {
 	min_oids[i] = min_oid;
 	rid_sizes[i] = rid_size;
       }
-      char* result = "WINNER";
+      int is_winner = 0;
+      int repeat = 0;
+      struct WinnerInfo *winner_info = NULL;
       if (min_oids[0] == min_oids[1]) {
-
-	/*
-	JLG(PV, WINNER_INFO, addr.s_addr);
-	if (PV != NULL) {
-	  struct RecursiveInfo *info = (struct RecursiveInfo*)*PV;
-	  info->cnt++;
-	} else {
-	  // printf("%s,%s,%s,%s,%s\n", ts,msgtype,nodeid,clientip,beacon);
-	  struct RecursiveInfo *info = (struct RecursiveInfo*)malloc(sizeof(struct RecursiveInfo));
+	is_winner = 1;
+	Word_t *PWIN;
+	// Anchor the winner to the recursive (if available)
+	uint32_t anchor_addr = 0;
+	if (beacon_info->recursiveip_addr.s_addr != 0) {
+	  anchor_addr = beacon_info->recursiveip_addr.s_addr;
 	}
-	*/
-
-	if (info->recursiveip[0] != 0) {
-	  dump_geo_asn_info(info->recursiveip);
-	  dump_geo_asn_info(info->clientip);
-	} else {
-	  dump_geo_asn_info(info->clientip);
+	else {
+	  printf("Anchoring winner to clientip %08x %s\n", beacon_info->addr.s_addr, beacon_info->clientip);
+	  anchor_addr = beacon_info->addr.s_addr;
 	}
-      } else {
-	result = "NO winner";
+
+	JLG(PWIN, WINNER_INFO, anchor_addr);
+	if (PWIN != NULL) {
+	  printf("REPEAT WINNER %08x\n", anchor_addr);
+	  winner_info = (struct WinnerInfo*)*PWIN;
+	  winner_info->cnt++;
+	  if (winner_info->oid == min_oids[0]) {
+	    winner_info->repeat++;
+	    repeat = winner_info->repeat;
+	    winner_info->ts_last = (unsigned int)now;
+	  } else {
+	    winner_info->repeat = 0;
+	    winner_info->last_oid = winner_info->oid;
+	    winner_info->oid = min_oids[0];
+	  }
+	} else {
+	  winner_info = (struct WinnerInfo*)malloc(sizeof(struct WinnerInfo));
+	  winner_info->cnt = 1;
+	  winner_info->repeat = 0;
+	  winner_info->oid = min_oids[0];
+	  winner_info->last_oid = 0;
+	  winner_info->ts_first = winner_info->ts_last = (unsigned int)now;
+	  winner_info->recursive.s_addr = beacon_info->recursiveip_addr.s_addr;
+	  winner_info->client.s_addr = beacon_info->addr.s_addr;
+	  winner_info->client_last.s_addr = 0;
+	  strcpy(winner_info->beacon, (char*)BeaconIndex);
+	  strcpy(winner_info->nodeid, beacon_info->nodeid);
+	  JLI(PWIN, WINNER_INFO, anchor_addr);
+	  *PWIN = (Word_t)winner_info;
+	}
       }
-      printf("%s\t recursive=%s clientip=%s\n", "WINNER", info->recursiveip, info->clientip);
-      printf("  r1 %s min=%f oid=%d size=%d\n", OID_TO_NAME(min_oids[0]), min_durs[0], min_oids[0], rid_sizes[0]);
-      printf("  r2 %s min=%f oid=%d size=%d\n", OID_TO_NAME(min_oids[0]), min_durs[1], min_oids[1], rid_sizes[1]);
+      printf("%s\t%s,%s,%s,%s\n", is_winner ? "WIN" : "!WIN", (char*)BeaconIndex, beacon_info->nodeid, beacon_info->recursiveip, beacon_info->clientip);
+      int r;
+      for (r = 0; r < beacon_info->unique_resources; r++) {
+	printf("  r[%d] %s min=%f oid=%d size=%d\n", r, OID_TO_NAME(min_oids[r]), min_durs[r], min_oids[r], rid_sizes[r]);
+      }
+      if (is_winner) {
+	printf("  cnt=%d repeat=%d", winner_info->cnt, repeat);
+	if (winner_info->cnt > 1) {
+	  printf(" first=%u last=%u age=%u\n", winner_info->ts_first, winner_info->ts_last, winner_info->ts_last - winner_info->ts_first);
+	} else {
+	  printf("\n");
+	}
+	if (beacon_info->recursiveip[0] != 0) {
+	  struct GeoAsnInfo info_recursive;
+	  get_geo_asn_info(beacon_info->recursiveip, &info_recursive);
+	  printf("  recurs=%15s (%18s) AS=%7d %s %s %f %f GEO lo=%08x hi=%08x\n", beacon_info->recursiveip, info_recursive.asn_prefix, info_recursive.asn, info_recursive.country, info_recursive.region, info_recursive.lat, info_recursive.lon, info_recursive.geolo.s_addr, info_recursive.geohi.s_addr);
+	  struct GeoAsnInfo info_client;
+	  get_geo_asn_info(beacon_info->clientip, &info_client);
+	  printf("  client=%15s (%18s) AS=%7d %s %s %f %f GEO lo=%08x hi-%08x\n", beacon_info->clientip, info_client.asn_prefix, info_client.asn, info_client.country, info_client.region, info_client.lat, info_client.lon, info_client.geolo.s_addr, info_client.geohi.s_addr);
+	} else {
+	  struct GeoAsnInfo info_client;
+	  get_geo_asn_info(beacon_info->clientip, &info_client);
+	  printf("  client=%15s (%18s) AS=%7d %s %s %f %f GEO lo=%08x hi-%08x\n", beacon_info->clientip, info_client.asn_prefix, info_client.asn, info_client.country, info_client.region, info_client.lat, info_client.lon, info_client.geolo.s_addr, info_client.geohi.s_addr);
+	}
+      }
+      for (i = 0; i < beacon_info->unique_resources; i++) {
+	for (x = 0; x < beacon_info->resource_cnt / beacon_info->unique_resources; x++) {
+	  unsigned int idx = i * (beacon_info->resource_cnt / beacon_info->unique_resources) + x;
+	  printf("  idx=%d oid=%d dur=%f size=%d\n", idx, beacon_info->oids[idx], beacon_info->durations[idx], beacon_info->sizes[idx]);
+	}
+      }
+      printf("----------------\n");
     }
     JSLN(PV, BEACON_INFO, BeaconIndex);
   }
