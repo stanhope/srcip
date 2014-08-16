@@ -148,17 +148,13 @@ int get_ranges( in_addr_t addr, int prefix, in_addr_t lo, in_addr_t hi, char* ra
 /* Convert an A.B.C.D address into a 32-bit host-order value */
 /*-----------------------------------------------------------*/
 in_addr_t a_to_hl( char *ipstr ) {
-
   struct in_addr in;
-
   if ( !inet_aton(ipstr, &in) ) {
     fprintf( stderr, "Invalid address %s!\n", ipstr );
-    exit( 1 );
+    return 0;
   }
-
-  return( ntohl(in.s_addr) );
-
-} /* a_to_hl() */
+  return( ntohl(in.s_addr));
+}
 
 
 /*-----------------------------------------------------------------*/
